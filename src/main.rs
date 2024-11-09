@@ -8,6 +8,9 @@ use hyper::{Server, Request, Response, Body, Method, StatusCode};
 use hyper::service::{make_service_fn, service_fn};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use local_ip_address::local_ip;
+use qrcode::QrCode;
+use qrcode::render::unicode;
 
 type SharedState = Arc<Mutex<HashMap<String, Vec<u8>>>>;
 
@@ -80,6 +83,13 @@ fn load_and_store_file(state: SharedState, file_path: &str, recipient: &str) -> 
     Ok(file_hash)
 }
 
+// Generate and print a QR code for the given URL
+fn print_qr_code(url: &str) {
+    let code = QrCode::new(url).unwrap();
+    let rendered = code.render::<unicode::Dense1x2>().build();
+    // println!("{}", rendered); // don't show QR for now!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
@@ -89,7 +99,11 @@ async fn main() -> io::Result<()> {
     let recipient = "magitian@duck.com";
 
     match load_and_store_file(state.clone(), file_path, recipient) {
-        Ok(hash) => println!("File available at: http://localhost:3000/file/{}", hash),
+        Ok(hash) => {
+            let connection_url = format!("http://{}:3000/file/{}", local_ip().unwrap(), hash);
+            println!("File available at: {}", connection_url);
+            print_qr_code(&connection_url);
+        }
         Err(e) => eprintln!("Failed to load file: {}", e),
     };
 
@@ -106,7 +120,6 @@ async fn main() -> io::Result<()> {
     let addr = ([0, 0, 0, 0], 3000).into();
     let server = Server::bind(&addr).serve(make_svc);
 
-    // println!("Server running on http://localhost:3000");
     server.await.map_err(|e| io::Error::new(io::ErrorKind::Other, e))
 }
 
