@@ -10,8 +10,16 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use qrcode::QrCode;
 use qrcode::render::unicode;
+use serde_json;
 
-pub type SharedState = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+pub type SharedState = Arc<Mutex<HashMap<String, FileMetadata>>>;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct FileMetadata {
+    pub original_name: String,
+    pub extension: String,
+    pub encrypted_content: Vec<u8>,
+}
 
 // Generate a unique hash for the file contents
 pub fn generate_file_hash(file_path: &str) -> io::Result<String> {
@@ -41,7 +49,6 @@ pub fn encrypt_file(file_path: &str, recipient: &str) -> io::Result<Vec<u8>> {
         return Err(io::Error::new(io::ErrorKind::Other, "GPG encryption failed"));
     }
 
-    // Read the encrypted file into a Vec<u8>
     let mut encrypted_data = Vec::new();
     let mut file = File::open(output_path)?;
     file.read_to_end(&mut encrypted_data)?;
@@ -51,12 +58,12 @@ pub fn encrypt_file(file_path: &str, recipient: &str) -> io::Result<Vec<u8>> {
 // Handle incoming requests, serving encrypted files based on hash
 pub async fn handle_request(req: Request<Body>, state: SharedState) -> Result<Response<Body>, hyper::Error> {
     match (req.method(), req.uri().path()) {
-        (&Method::GET, path) if path.starts_with("/file/") => {
-            let file_hash = &path[6..];
+        (&Method::GET, "/file/latest") => {
             let state = state.lock().unwrap();
             
-            if let Some(encrypted_file) = state.get(file_hash) {
-                Ok(Response::new(Body::from(encrypted_file.clone())))
+            if let Some((_, metadata)) = state.iter().last() {
+                let response_body = serde_json::to_string(metadata).unwrap();
+                Ok(Response::new(Body::from(response_body)))
             } else {
                 let mut not_found = Response::default();
                 *not_found.status_mut() = StatusCode::NOT_FOUND;
@@ -74,10 +81,28 @@ pub async fn handle_request(req: Request<Body>, state: SharedState) -> Result<Re
 // Load and encrypt the file, storing it in the shared state with its hash as the key
 pub fn load_and_store_file(state: SharedState, file_path: &str, recipient: &str) -> io::Result<String> {
     let file_hash = generate_file_hash(file_path)?;
-    let encrypted_file = encrypt_file(file_path, recipient)?;
+    let encrypted_content = encrypt_file(file_path, recipient)?;
+
+    let original_name = std::path::Path::new(file_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file")
+        .to_string();
+    
+    let extension = std::path::Path::new(file_path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    let metadata = FileMetadata {
+        original_name,
+        extension,
+        encrypted_content,
+    };
     
     let mut state = state.lock().unwrap();
-    state.insert(file_hash.clone(), encrypted_file);
+    state.insert(file_hash.clone(), metadata);
 
     Ok(file_hash)
 }
@@ -105,4 +130,3 @@ pub async fn start_server(state: SharedState) -> io::Result<()> {
 
     server.await.map_err(|e| io::Error::new(io::ErrorKind::Other, e))
 }
-
