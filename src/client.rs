@@ -13,9 +13,9 @@ async fn main() -> io::Result<()> {
     match client.get(server_url).send().await {
         Ok(response) if response.status().is_success() => {
             let metadata: FileMetadata = response.json().await?;
-            let mut file = File::create(format!("{}_enc.{}", metadata.original_name, metadata.extension))?;
+            let mut file = File::create(format!("{}.{}_enc", metadata.original_name, metadata.extension))?;
             file.write_all(&metadata.encrypted_content)?;
-            println!("File downloaded and saved as: {}_enc.{}", metadata.original_name, metadata.extension);
+            println!("File downloaded and saved as: {}.{}_enc", metadata.original_name, metadata.extension);
         }
         Ok(response) => {
             eprintln!("Failed to download file. Server responded with status: {}", response.status());
