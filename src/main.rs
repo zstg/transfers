@@ -106,7 +106,7 @@ async fn main() -> io::Result<()> {
     let addr = ([0, 0, 0, 0], 3000).into();
     let server = Server::bind(&addr).serve(make_svc);
 
-    println!("Server running on http://localhost:3000");
+    // println!("Server running on http://localhost:3000");
     server.await.map_err(|e| io::Error::new(io::ErrorKind::Other, e))
 }
 
