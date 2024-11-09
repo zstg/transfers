@@ -86,8 +86,8 @@ fn load_and_store_file(state: SharedState, file_path: &str, recipient: &str) -> 
 // Generate and print a QR code for the given URL
 fn print_qr_code(url: &str) {
     let code = QrCode::new(url).unwrap();
-    let rendered = code.render::<unicode::Dense1x2>().build();
-    // println!("{}", rendered); // don't show QR for now!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    let _rendered = code.render::<unicode::Dense1x2>().build();
+    // println!("{}", _rendered); // don't show QR for now!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 }
 
 #[tokio::main]
