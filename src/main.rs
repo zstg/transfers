@@ -1,0 +1,112 @@
+use std::fs::File;
+use std::io::{self, Read};
+use std::process::Command;
+use sha2::{Sha256, Digest};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use hyper::{Server, Request, Response, Body, Method, StatusCode};
+use hyper::service::{make_service_fn, service_fn};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+
+type SharedState = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+
+// Generate a unique hash for the file contents
+fn generate_file_hash(file_path: &str) -> io::Result<String> {
+    let mut file = File::open(file_path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 1024];
+    while let Ok(bytes) = file.read(&mut buffer) {
+        if bytes == 0 { break; }
+        hasher.update(&buffer[..bytes]);
+    }
+    Ok(URL_SAFE_NO_PAD.encode(hasher.finalize()))
+}
+
+// Encrypt the file using GPG by invoking the system's gpg command
+fn encrypt_file(file_path: &str, recipient: &str) -> io::Result<Vec<u8>> {
+    let output_path = format!("{}.gpg", file_path);
+    let status = Command::new("gpg")
+        .arg("--encrypt")
+        .arg("--recipient")
+        .arg(recipient)
+        .arg("--output")
+        .arg(&output_path)
+        .arg(file_path)
+        .status()?;
+
+    if !status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, "GPG encryption failed"));
+    }
+
+    // Read the encrypted file into a Vec<u8>
+    let mut encrypted_data = Vec::new();
+    let mut file = File::open(output_path)?;
+    file.read_to_end(&mut encrypted_data)?;
+    Ok(encrypted_data)
+}
+
+// Handle incoming requests, serving encrypted files based on hash
+async fn handle_request(req: Request<Body>, state: SharedState) -> Result<Response<Body>, hyper::Error> {
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, path) if path.starts_with("/file/") => {
+            let file_hash = &path[6..];
+            let state = state.lock().unwrap();
+            
+            if let Some(encrypted_file) = state.get(file_hash) {
+                Ok(Response::new(Body::from(encrypted_file.clone())))
+            } else {
+                let mut not_found = Response::default();
+                *not_found.status_mut() = StatusCode::NOT_FOUND;
+                Ok(not_found)
+            }
+        }
+        _ => {
+            let mut not_found = Response::default();
+            *not_found.status_mut() = StatusCode::NOT_FOUND;
+            Ok(not_found)
+        }
+    }
+}
+
+// Load and encrypt the file, storing it in the shared state with its hash as the key
+fn load_and_store_file(state: SharedState, file_path: &str, recipient: &str) -> io::Result<String> {
+    let file_hash = generate_file_hash(file_path)?;
+    let encrypted_file = encrypt_file(file_path, recipient)?;
+    
+    let mut state = state.lock().unwrap();
+    state.insert(file_hash.clone(), encrypted_file);
+
+    Ok(file_hash)
+}
+
+#[tokio::main]
+async fn main() -> io::Result<()> {
+    let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+
+    // File path and recipient details
+    let file_path = "file.txt";
+    let recipient = "magitian@duck.com";
+
+    match load_and_store_file(state.clone(), file_path, recipient) {
+        Ok(hash) => println!("File available at: http://localhost:3000/file/{}", hash),
+        Err(e) => eprintln!("Failed to load file: {}", e),
+    };
+
+    // Start the HTTP server
+    let make_svc = make_service_fn(|_| {
+        let state = state.clone();
+        async {
+            Ok::<_, hyper::Error>(service_fn(move |req| {
+                handle_request(req, state.clone())
+            }))
+        }
+    });
+
+    let addr = ([0, 0, 0, 0], 3000).into();
+    let server = Server::bind(&addr).serve(make_svc);
+
+    println!("Server running on http://localhost:3000");
+    server.await.map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+}
+
