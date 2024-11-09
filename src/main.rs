@@ -1,3 +1,4 @@
+use std::env;
 use std::fs::File;
 use std::io::{self, Read};
 use std::process::Command;
@@ -92,11 +93,20 @@ fn print_qr_code(url: &str) {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+    // Get the command-line arguments
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} <file_path>", args[0]);
+        return Ok(());
+    }
 
-    // File path and recipient details
-    let file_path = "file.txt";
+    // Get the file path from the arguments
+    let file_path = &args[1];
+    
+    // Set the recipient (can also be passed as an argument if needed)
     let recipient = "magitian@duck.com";
+
+    let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
 
     match load_and_store_file(state.clone(), file_path, recipient) {
         Ok(hash) => {
