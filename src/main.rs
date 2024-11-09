@@ -2,12 +2,9 @@ use std::env;
 use std::io;
 use std::path::Path;
 use std::process;
-use server::{load_and_store_file, print_qr_code, start_server};
 use local_ip_address::local_ip;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use server::SharedState;
-
 mod server;
 
 #[tokio::main]
@@ -25,13 +22,13 @@ async fn main() -> io::Result<()> {
         }
         
         let recipient = "magitian@duck.com";
-        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+        let state: server::SharedState = Arc::new(Mutex::new(HashMap::new()));
 
-        match load_and_store_file(state.clone(), file_path, recipient) {
+        match server::load_and_store_file(state.clone(), file_path, recipient) {
             Ok(hash) => {
                 let connection_url = format!("http://{}:3000/file/{}", local_ip().unwrap(), hash);
                 println!("File available at: {}", connection_url);
-                print_qr_code(&connection_url);
+                server::print_qr_code(&connection_url);
             }
             Err(e) => {
                 eprintln!("Failed to load and encrypt file: {}", e);
@@ -40,7 +37,7 @@ async fn main() -> io::Result<()> {
         };
 
         // Start the HTTP server
-        start_server(state).await.expect("Error")
+        server::start_server(state).await.expect("Error")
     }
     else if args.len() == 1 {
         // Client mode: no arguments required
