@@ -1,135 +1,105 @@
 use std::env;
-use std::fs::File;
-use std::io::{self, Read};
-use std::process::Command;
-use sha2::{Sha256, Digest};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use hyper::{Server, Request, Response, Body, Method, StatusCode};
-use hyper::service::{make_service_fn, service_fn};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
+use std::io;
+use std::path::Path;
+use std::process;
+use server::{load_and_store_file, print_qr_code, start_server};
 use local_ip_address::local_ip;
-use qrcode::QrCode;
-use qrcode::render::unicode;
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use server::SharedState;
 
-type SharedState = Arc<Mutex<HashMap<String, Vec<u8>>>>;
-
-// Generate a unique hash for the file contents
-fn generate_file_hash(file_path: &str) -> io::Result<String> {
-    let mut file = File::open(file_path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 1024];
-    while let Ok(bytes) = file.read(&mut buffer) {
-        if bytes == 0 { break; }
-        hasher.update(&buffer[..bytes]);
-    }
-    Ok(URL_SAFE_NO_PAD.encode(hasher.finalize()))
-}
-
-// Encrypt the file using GPG by invoking the system's gpg command
-fn encrypt_file(file_path: &str, recipient: &str) -> io::Result<Vec<u8>> {
-    let output_path = format!("{}.gpg", file_path);
-    let status = Command::new("gpg")
-        .arg("--encrypt")
-        .arg("--recipient")
-        .arg(recipient)
-        .arg("--output")
-        .arg(&output_path)
-        .arg(file_path)
-        .status()?;
-
-    if !status.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "GPG encryption failed"));
-    }
-
-    // Read the encrypted file into a Vec<u8>
-    let mut encrypted_data = Vec::new();
-    let mut file = File::open(output_path)?;
-    file.read_to_end(&mut encrypted_data)?;
-    Ok(encrypted_data)
-}
-
-// Handle incoming requests, serving encrypted files based on hash
-async fn handle_request(req: Request<Body>, state: SharedState) -> Result<Response<Body>, hyper::Error> {
-    match (req.method(), req.uri().path()) {
-        (&Method::GET, path) if path.starts_with("/file/") => {
-            let file_hash = &path[6..];
-            let state = state.lock().unwrap();
-            
-            if let Some(encrypted_file) = state.get(file_hash) {
-                Ok(Response::new(Body::from(encrypted_file.clone())))
-            } else {
-                let mut not_found = Response::default();
-                *not_found.status_mut() = StatusCode::NOT_FOUND;
-                Ok(not_found)
-            }
-        }
-        _ => {
-            let mut not_found = Response::default();
-            *not_found.status_mut() = StatusCode::NOT_FOUND;
-            Ok(not_found)
-        }
-    }
-}
-
-// Load and encrypt the file, storing it in the shared state with its hash as the key
-fn load_and_store_file(state: SharedState, file_path: &str, recipient: &str) -> io::Result<String> {
-    let file_hash = generate_file_hash(file_path)?;
-    let encrypted_file = encrypt_file(file_path, recipient)?;
-    
-    let mut state = state.lock().unwrap();
-    state.insert(file_hash.clone(), encrypted_file);
-
-    Ok(file_hash)
-}
-
-// Generate and print a QR code for the given URL
-fn print_qr_code(url: &str) {
-    let code = QrCode::new(url).unwrap();
-    let _rendered = code.render::<unicode::Dense1x2>().build();
-    // println!("{}", _rendered); // don't show QR for now!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-}
+mod server;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     // Get the command-line arguments
     let args: Vec<String> = env::args().collect();
+    
+    // Check if the first argument is for the client or server
     if args.len() < 2 {
-        eprintln!("Usage: {} <file_path>", args[0]);
-        return Ok(());
+        eprintln!("Usage: {} <file_path> (for server) or {} <file_hash> (for client)", args[0], args[0]);
+        process::exit(1);
+    }
+    
+    // Server mode (expects a file path)
+    if args.len() == 2 && Path::new(&args[1]).exists() {
+        // Server mode: file path provided
+        let file_path = &args[1];
+
+        // Check if the file exists
+        if !Path::new(file_path).exists() {
+            eprintln!("Error: The specified file does not exist: {}", file_path);
+            return Ok(());
+        }
+        
+        // Set the recipient (can also be passed as an argument if needed)
+        let recipient = "magitian@duck.com";
+        
+        let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+
+        match load_and_store_file(state.clone(), file_path, recipient) {
+            Ok(hash) => {
+                let connection_url = format!("http://{}:3000/file/{}", local_ip().unwrap(), hash);
+                println!("File available at: {}", connection_url);
+                print_qr_code(&connection_url);
+            }
+            Err(e) => {
+                eprintln!("Failed to load and encrypt file: {}", e);
+                return Ok(());
+            },
+        };
+
+        // Start the HTTP server
+        start_server(state).await.expect("Error")
+    }
+    // Client mode (expects a file hash)
+    else if args.len() == 2 {
+        // Client mode: file hash provided
+        let file_hash = &args[1];
+        let server_url = format!("http://localhost:3000/file/{}", file_hash);
+        
+        // Call the client functionality (as the existing client logic)
+        use reqwest::Client;
+        use std::fs::File;
+        use std::io::Write;
+        
+        // Initialize the HTTP client
+        let client = Client::new();
+        
+        // Send a GET request to the server to retrieve the encrypted file
+        match client.get(&server_url).send().await {
+            Ok(response) if response.status().is_success() => {
+                // If the response is successful, save the file to disk
+                let mut file = File::create(format!("{}.gpg", file_hash))?;
+                match response.bytes().await {
+                    Ok(bytes) => {
+                        file.write_all(&bytes)?;
+                        println!("File downloaded successfully: {}.gpg", file_hash);
+                    }
+                    Err(err) => {
+                        eprintln!("Failed to read response bytes: {}", err);
+                        process::exit(1);
+                    }
+                }
+            }
+            Ok(response) => {
+                // Handle non-200 responses
+                eprintln!("Failed to download file. Server responded with status: {}", response.status());
+                process::exit(1);
+            }
+            Err(err) => {
+                // Handle request errors
+                eprintln!("Error sending request: {}", err);
+                process::exit(1);
+            }
+        }
+    }
+    else {
+        // If arguments are invalid, show usage message
+        eprintln!("Usage: {} <file_path> (for server) or {} <file_hash> (for client)", args[0], args[0]);
+        process::exit(1);
     }
 
-    // Get the file path from the arguments
-    let file_path = &args[1];
-    
-    // Set the recipient (can also be passed as an argument if needed)
-    let recipient = "magitian@duck.com";
-
-    let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
-
-    match load_and_store_file(state.clone(), file_path, recipient) {
-        Ok(hash) => {
-            let connection_url = format!("http://{}:3000/file/{}", local_ip().unwrap(), hash);
-            println!("File available at: {}", connection_url);
-            print_qr_code(&connection_url);
-        }
-        Err(e) => eprintln!("Failed to load file: {}", e),
-    };
-
-    // Start the HTTP server
-    let make_svc = make_service_fn(|_| {
-        let state = state.clone();
-        async {
-            Ok::<_, hyper::Error>(service_fn(move |req| {
-                handle_request(req, state.clone())
-            }))
-        }
-    });
-
-    let addr = ([0, 0, 0, 0], 3000).into();
-    let server = Server::bind(&addr).serve(make_svc);
-
-    server.await.map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    Ok(())
 }
 
